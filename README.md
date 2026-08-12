@@ -1,4 +1,4 @@
-# LRU Cache (Java) — Built From Scratch
+# LRU Cache — Built From Scratch
 
 A distributed-style in-memory key-value cache built entirely from scratch in Java, without relying on `LinkedHashMap`, `OrderedDict`-equivalents, or any caching library. Built as a deep-dive project to prepare for backend/SDE interviews, covering the core data structure, TTL expiration, thread safety, a network protocol, and containerized deployment.
 
@@ -9,7 +9,7 @@ A distributed-style in-memory key-value cache built entirely from scratch in Jav
 - **Thread safety** — `ReentrantReadWriteLock` protecting all shared state, validated under concurrent load with a custom integrity checker
 - **TCP network layer** — a simple Redis-style text protocol (`GET`/`SET`) served over raw sockets, one thread per client connection
 - **Containerized** — multi-stage Docker build (JDK to compile, lean JRE to run)
-- **Deployed on AWS EC2** *(in progress)*
+- **Deployed on AWS EC2** — containerized server running on a t3.micro instance, verified reachable over the public internet
 
 ## Architecture
 ```
@@ -63,3 +63,21 @@ nc localhost 6380
 SET 1 100
 GET 1
 ```
+
+## Demo
+
+**Protocol testing — full command coverage (GET/SET, case-insensitivity, error handling):**
+
+![Manual protocol test](docs/screenshots/protocol-test.png)
+
+**Client connecting and receiving responses:**
+
+![Client test output](docs/screenshots/client-test-output.png)
+
+**Container running on the deployed EC2 instance:**
+
+![Container status on EC2](docs/screenshots/ec2-docker-ps.png)
+
+**Server logs confirming it's listening and accepting connections:**
+
+![Server logs](docs/screenshots/ec2-docker-logs.png)
