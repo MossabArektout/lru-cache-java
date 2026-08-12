@@ -252,4 +252,47 @@ public class LRUCache {
             e.printStackTrace();
         }
     }
+
+    public String handleCommand(String line){
+        line = line.trim();
+
+        if (line.isEmpty()) {
+            return "ERROR empty command";
+        }
+
+        String[] parts = line.split("\\s+");
+
+        switch (parts[0].toUpperCase()){
+            case "GET":
+                if (parts.length != 2){
+                    return "ERROR wrong number of arguments";
+                }
+
+                try {
+                    int key = Integer.parseInt(parts[1]);
+                    int result = get(key);
+                    return String.valueOf(result);
+                } catch (NumberFormatException e) {
+                    return "ERROR invalid key";
+                }
+
+            case "SET":
+                if (parts.length != 3) {
+                    return "ERROR wrong number of arguments";
+                }
+
+                try {
+                    int key = Integer.parseInt(parts[1]);
+                    int value = Integer.parseInt(parts[2]);
+
+                    put(key, value);
+                    return "OK";
+                } catch (NumberFormatException e) {
+                    return "ERROR invalid key";
+                }
+
+            default:
+                return "ERROR unknown command";
+        }
+    }
 }
