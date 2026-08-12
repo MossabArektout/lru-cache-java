@@ -4,6 +4,7 @@ import java.util.Iterator;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class LRUCache {
     private static class Node{
@@ -19,14 +20,19 @@ public class LRUCache {
         };
     }
 
-    private int capacity;
-    private HashMap<Integer, Node> map;
-    private long defaultTtlMillis;
+    private final int capacity;
+    private final HashMap<Integer, Node> map;
+    private final long defaultTtlMillis;
 
-    private Node head;
-    private Node tail;
+    private final Node head;
+    private final Node tail;
 
-    private ScheduledExecutorService scheduler;
+    private final ScheduledExecutorService scheduler;
+
+    // Guards map + the linked list. get() mutates the list on every hit
+    // (move-to-front), so it takes the WRITE lock, not the read lock -
+    // see the class-level notes on why a plain read lock would be unsafe here.
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
     public LRUCache(int capacity, long defaultTtlMillis,  long sweepIntervalMillis){
         this.capacity = capacity;
@@ -40,18 +46,23 @@ public class LRUCache {
         tail.prev = head;
 
         this.scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(this::sweepExpired, sweepIntervalMillis,sweepIntervalMillis, TimeUnit.MICROSECONDS);
+        scheduler.scheduleAtFixedRate(this::sweepExpired, sweepIntervalMillis, sweepIntervalMillis, TimeUnit.MILLISECONDS);
     }
 
-    private synchronized void sweepExpired(){
-        Iterator<Map.Entry<Integer, Node>> it = map.entrySet().iterator();
-        while(it.hasNext()){
-            Node node = it.next().getValue();
+    private void sweepExpired(){
+        lock.writeLock().lock();
+        try {
+            Iterator<Map.Entry<Integer, Node>> it = map.entrySet().iterator();
+            while(it.hasNext()){
+                Node node = it.next().getValue();
 
-            if (isExpired(node)){
-                removeNode(node);
-                it.remove();
+                if (isExpired(node)){
+                    removeNode(node);
+                    it.remove();
+                }
             }
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -76,41 +87,51 @@ public class LRUCache {
     }
 
     public int get(int key){
-        if (!map.containsKey(key)){
-            return -1;
-        }
+        // Write lock, not read: even on a hit this mutates the linked list
+        // (move-to-front), and on an expired hit it also mutates the map.
+        lock.writeLock().lock();
+        try {
+            Node node = map.get(key);
+            if (node == null){
+                return -1;
+            }
 
-        Node node = map.get(key);
+            if (isExpired(node)){
+                removeNode(node);
+                map.remove(key);
+                return -1;
+            }
 
-        if (isExpired(node)){
             removeNode(node);
-            map.remove(key);
-            return  -1;
+            addToFront(node);
+            return node.value;
+        } finally {
+            lock.writeLock().unlock();
         }
-        removeNode(node);
-        addToFront(node);
-
-
-        return node.value;
     }
 
     public void put(int key, int value){
-        if (map.containsKey(key)){
-            Node node = map.get(key);
-            node.value = value;
-            node.expiryTime = System.currentTimeMillis() + defaultTtlMillis;
-            removeNode(node);
-            addToFront(node);
-            return;
-        }
+        lock.writeLock().lock();
+        try {
+            Node existing = map.get(key);
+            if (existing != null){
+                existing.value = value;
+                existing.expiryTime = System.currentTimeMillis() + defaultTtlMillis;
+                removeNode(existing);
+                addToFront(existing);
+                return;
+            }
 
-        Node node = new Node(key, value, System.currentTimeMillis() + defaultTtlMillis);
-        map.put(key,node);
-        addToFront(node);
-        if (map.size()>capacity){
-            Node lru = tail.prev;
-            removeNode(lru);
-            map.remove(lru.key);
+            Node node = new Node(key, value, System.currentTimeMillis() + defaultTtlMillis);
+            map.put(key, node);
+            addToFront(node);
+            if (map.size() > capacity){
+                Node lru = tail.prev;
+                removeNode(lru);
+                map.remove(lru.key);
+            }
+        } finally {
+            lock.writeLock().unlock();
         }
     }
 
@@ -119,7 +140,76 @@ public class LRUCache {
     }
 
     public int size() {
-        return map.size();
+        // Pure read of map state - no list mutation, so a read lock is
+        // actually correct here (unlike get()).
+        lock.readLock().lock();
+        try {
+            return map.size();
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    // Walks the list in both directions and cross-checks it against the map.
+    // Takes the write lock so it sees a consistent snapshot - a read lock
+    // would not exclude concurrent get()/put() mutation of the list.
+    // Throws IllegalStateException with a description of the first problem
+    // found; returns normally if the structure is consistent.
+    public void validateIntegrity(){
+        lock.writeLock().lock();
+        try {
+            if (head.prev != null){
+                throw new IllegalStateException("head.prev is not null - sentinel corrupted");
+            }
+            if (tail.next != null){
+                throw new IllegalStateException("tail.next is not null - sentinel corrupted");
+            }
+
+            java.util.Set<Integer> seenKeys = new java.util.HashSet<>();
+            Node node = head.next;
+            int forwardCount = 0;
+            while (node != tail){
+                if (node.prev.next != node){
+                    throw new IllegalStateException("broken forward link at key=" + node.key);
+                }
+                if (!seenKeys.add(node.key)){
+                    throw new IllegalStateException("key=" + node.key + " appears twice in list (cycle?)");
+                }
+                if (!map.containsKey(node.key)){
+                    throw new IllegalStateException("key=" + node.key + " is in list but missing from map");
+                }
+                if (map.get(node.key) != node){
+                    throw new IllegalStateException("map entry for key=" + node.key + " does not point to the list node");
+                }
+                forwardCount++;
+                if (forwardCount > map.size()){
+                    throw new IllegalStateException("list traversal exceeded map size - likely cycle");
+                }
+                node = node.next;
+            }
+
+            Node back = tail.prev;
+            int backwardCount = 0;
+            while (back != head){
+                if (back.next.prev != back){
+                    throw new IllegalStateException("broken backward link at key=" + back.key);
+                }
+                backwardCount++;
+                back = back.prev;
+            }
+
+            if (forwardCount != backwardCount){
+                throw new IllegalStateException("forward count (" + forwardCount + ") != backward count (" + backwardCount + ")");
+            }
+            if (forwardCount != map.size()){
+                throw new IllegalStateException("list size (" + forwardCount + ") != map size (" + map.size() + ")");
+            }
+            if (map.size() > capacity){
+                throw new IllegalStateException("map size (" + map.size() + ") exceeds capacity (" + capacity + ")");
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
     }
 
     public static void main(String[] args) {
