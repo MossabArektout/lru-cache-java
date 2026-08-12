@@ -7,8 +7,10 @@ import java.net.Socket;
 public class ClientTest {
 
     public static void main(String[] args) {
+        String host = args.length > 0 ? args[0] : "localhost";
+
         try (
-                Socket socket = new Socket("localhost", 6380);
+                Socket socket = new Socket(host, 6380);
                 PrintWriter out = new PrintWriter(
                         socket.getOutputStream(), true
                 );
